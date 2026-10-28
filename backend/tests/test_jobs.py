@@ -302,6 +302,32 @@ class TestRodarScraperComProgresso:
         assert len(linhas_recebidas) == 3
         assert "linha 0" in linhas_recebidas[0]
 
+    def test_progresso_escrito_no_stderr_chega_ao_callback(self):
+        # o scraper real escreve o log JSON de progresso no stderr, não no stdout
+        comando = [
+            sys.executable, "-c",
+            "import sys\n"
+            "print('{\"message\":\"16 places found\"}', file=sys.stderr)\n"
+            "print('{\"message\":\"job finished\"}', file=sys.stderr)\n",
+        ]
+        linhas_recebidas = []
+        returncode, _ = jobs.rodar_scraper_com_progresso(
+            comando=comando, cwd=None, env=None, timeout_segundos=30,
+            callback_linha=linhas_recebidas.append,
+        )
+        assert returncode == 0
+        assert any("places found" in linha for linha in linhas_recebidas)
+        assert any("job finished" in linha for linha in linhas_recebidas)
+
+    def test_timeout_dispara_mesmo_se_o_processo_ficar_calado(self):
+        comando = [sys.executable, "-c", "import time; time.sleep(60)"]
+        inicio = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired):
+            jobs.rodar_scraper_com_progresso(
+                comando=comando, cwd=None, env=None, timeout_segundos=2,
+            )
+        assert time.monotonic() - inicio < 20
+
     def test_returncode_de_erro_e_propagado(self):
         comando = [sys.executable, "-c", "import sys; sys.exit(2)"]
         returncode, _ = jobs.rodar_scraper_com_progresso(

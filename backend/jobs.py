@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -242,11 +243,19 @@ def traduzir_erro_scraper(stderr, returncode):
     )
 
 
-def _ler_stderr_em_thread(pipe, buffer_lista):
+def _ler_stderr_em_thread(pipe, buffer_lista, callback_linha=None):
     """Lê stderr continuamente numa thread separada, pra não bloquear o pipe
-    (senão o processo trava se encher o buffer de stderr enquanto só lemos stdout)."""
+    (senão o processo trava se encher o buffer de stderr enquanto só lemos stdout).
+    O scraper escreve o log JSON ("job finished", "N places found") no stderr,
+    não no stdout - sem repassar pro callback, o progresso ficava em 0 durante
+    todo o scraping e a busca parecia travada."""
     for linha in iter(pipe.readline, ""):
         buffer_lista.append(linha)
+        if callback_linha:
+            try:
+                callback_linha(linha)
+            except Exception:
+                logger.exception("falha ao interpretar linha de progresso do scraper")
     pipe.close()
 
 
@@ -281,9 +290,11 @@ def rodar_scraper_com_progresso(comando, cwd, env, timeout_segundos, callback_li
         bufsize=1,
     )
 
-    stderr_linhas = []
+    # só as últimas linhas importam (vão pro log e pra mensagem de erro); uma
+    # busca grande gera milhares de linhas de log no stderr
+    stderr_linhas = deque(maxlen=500)
     thread_stderr = threading.Thread(
-        target=_ler_stderr_em_thread, args=(processo.stderr, stderr_linhas), daemon=True
+        target=_ler_stderr_em_thread, args=(processo.stderr, stderr_linhas, callback_linha), daemon=True
     )
     thread_stderr.start()
 
