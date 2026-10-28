@@ -4,6 +4,43 @@ Todas as mudanças relevantes deste projeto são documentadas aqui.
 O formato segue o [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 e o projeto adota versionamento semântico.
 
+## [Não lançado]
+
+### Segurança
+- A API local só atende a própria máquina: Host não-local (DNS rebinding) e
+  escritas com Origin de outro site (CSRF) recebem 403.
+- Analisador de sites não acessa mais localhost/rede interna (SSRF), nem via
+  redirecionamento; lê no máximo 300 KB dentro de um prazo total.
+- Exportação CSV escapa fórmulas (CSV injection a partir de bios/comentários).
+- App de desktop: links comparados pela origem exata, bloqueio por padrão e
+  `will-navigate` nas janelas principal e do WhatsApp.
+- Dependências do frontend atualizadas: 23 vulnerabilidades (1 crítica, 16
+  altas) → 3 baixas, só no CLI de desenvolvimento do shadcn.
+
+### Corrigido
+- Leads recebiam nicho/cidade da query errada quando uma query não tinha
+  resultado (agora o `input_id` é determinístico: `q0`, `q1`...).
+- Timeout do scraper não disparava se ele travasse sem imprimir nada; ao
+  cancelar, os processos do Chromium agora também são encerrados.
+- Análise do Instagram interrompida por restart ficava "em andamento" para
+  sempre, sem botão de retomar.
+- Excluir um post do Instagram podia apagar um lead já trabalhado que tinha
+  comentado nele.
+- Backup do banco agora usa a API de backup do SQLite (seguro em modo WAL).
+- Erro inesperado numa empresa não derruba mais a verificação do lote todo.
+- "Sem atualização desde 2001" em sites com copyright "2001-2026".
+- Observações salvas e fim da análise do Instagram não atualizavam a tela.
+- Som começava mudo em instalação nova.
+- Exportação CSV com BOM (acentos corretos no Excel).
+- App de desktop: uma segunda instância não sobe mais um segundo backend.
+
+### Alterado
+- Telas carregadas sob demanda: bundle inicial de 1,36 MB → 669 kB.
+- Dependências atualizadas (React 19.3, Vite 8.3, React Router 7.18.5,
+  google-genai 2.33, openai 2.54, instagrapi 2.18.20, entre outras).
+- Receita versionada do rebuild do `google-maps-scraper.exe` para Windows em
+  `backend/build-scraper/`.
+
 ## [2.0.0] - 2026-07-17
 
 Salto grande: o ProspectOS deixou de ser "achador de leads sem site" e virou uma
