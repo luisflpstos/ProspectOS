@@ -611,6 +611,23 @@ class TestMapearQueriesPorInputId:
 
         assert resultado == {"id-1": "nicho um", "id-2": "nicho dois"}
 
+    def test_id_deterministico_nao_desloca_quando_query_vem_vazia(self, tmp_path):
+        # a 1ª query não achou nada (nenhuma linha q0): pela ordem, a padaria
+        # viraria "dentista em A" - pelo índice, cada lead fica com a sua query
+        caminho_csv = tmp_path / "bruto.csv"
+        caminho_csv.write_text(
+            "input_id,title\n"
+            "q2,Pet Shop X\n"
+            "q1,Padaria Y\n",
+            encoding="utf-8",
+        )
+        caminho_queries = tmp_path / "queries.txt"
+        caminho_queries.write_text("dentista em A\npadaria em B\npet shop em C\n", encoding="utf-8")
+
+        resultado = mapear_queries_por_input_id(caminho_csv, caminho_queries)
+
+        assert resultado == {"q1": "padaria em B", "q2": "pet shop em C"}
+
     def test_arquivo_de_queries_inexistente_retorna_vazio(self, tmp_path):
         caminho_csv = tmp_path / "bruto.csv"
         caminho_csv.write_text("input_id,title\nid-1,Empresa A\n", encoding="utf-8")

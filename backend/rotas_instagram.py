@@ -1,17 +1,16 @@
 """Rotas do canal Instagram: disparo da análise de post, posts (arquivar/excluir),
 leads (funil, tags, observações, follow-up, DM) e exportação."""
 
-import csv
-import io
 import json
 import logging
 import re
 from datetime import datetime
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, jsonify, request
 
 import db
+import exportacao
 import ia
 import jobs
 import paths
@@ -308,19 +307,14 @@ def exportar_csv_instagram(post_id):
     finally:
         conexao.close()
 
-    saida = io.StringIO()
-    escritor = csv.writer(saida)
-    escritor.writerow(
+    return exportacao.resposta_csv(
         [
             "username", "full_name", "biography", "seguidores", "is_private",
             "is_business_account", "status", "prioridade", "nicho", "tags",
             "sugestao_dm", "justificativa", "observacoes", "proximo_followup",
             "follow_ups_enviados", "ultimo_followup_em", "comentarios",
-        ]
-    )
-    for lead in linhas:
-        comentarios = _comentarios_do_lead(lead)
-        escritor.writerow(
+        ],
+        (
             [
                 lead["username"],
                 lead["full_name"],
@@ -338,13 +332,12 @@ def exportar_csv_instagram(post_id):
                 lead["proximo_followup"] or "",
                 lead["follow_ups_enviados"] or 0,
                 lead["ultimo_followup_em"] or "",
-                "; ".join(comentarios),
+                "; ".join(_comentarios_do_lead(lead)),
             ]
-        )
-
-    resposta = Response(saida.getvalue(), mimetype="text/csv; charset=utf-8")
-    resposta.headers["Content-Disposition"] = "attachment; filename=leads_instagram_exportados.csv"
-    return resposta
+            for lead in linhas
+        ),
+        "leads_instagram_exportados.csv",
+    )
 
 
 @bp.route("/api/instagram/leads/<int:lead_id>/analise", methods=["POST"])

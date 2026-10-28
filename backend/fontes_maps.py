@@ -16,7 +16,6 @@ cobrança/cota é gerenciada pelo usuário no Google Cloud.
 
 import csv
 import logging
-import uuid
 
 import requests
 
@@ -153,7 +152,9 @@ def buscar_com_places_api(queries, arquivo_csv, chave, area=None, callback_query
             for indice, texto in enumerate(queries, start=1):
                 if callback_query:
                     callback_query(indice, len(queries), texto)
-                input_id = str(uuid.uuid4())
+                # mesmo formato do id que o scraper recebe ("q<índice 0-based>"):
+                # o pipeline mapeia query→leads pelo índice, não pela ordem
+                input_id = f"q{indice - 1}"
                 places = _buscar_uma_query(chave, texto, area=area)
                 for place in places:
                     escritor.writerow(_place_para_linha(place, input_id))

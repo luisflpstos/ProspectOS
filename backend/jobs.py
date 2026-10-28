@@ -360,9 +360,20 @@ def zoom_para_raio(raio_m):
 def _executar_scraper(arquivo_bruto, ambiente, flags_extras=()):
     """Roda o binário do scraper uma vez, com progresso ao vivo.
     Retorna None em sucesso, ou a mensagem de erro amigável em falha."""
+    # cada linha leva um id fixo ("texto #!# q0") que o scraper grava no
+    # input_id do CSV - sem isso o pipeline teria que adivinhar a query de cada
+    # lead pela ordem de saída, e uma query sem resultado deslocaria as demais
+    entrada_scraper = DIR_DADOS / "queries_scraper.txt"
+    entrada_scraper.write_text(
+        "".join(
+            f"{texto} #!# {processar.id_da_query(indice)}\n"
+            for indice, texto in enumerate(_ler_queries_da_busca())
+        ),
+        encoding="utf-8",
+    )
     comando_scraper = [
         str(caminho_recurso("google-maps-scraper.exe")),
-        "-input", str(DIR_DADOS / "queries.txt"),
+        "-input", str(entrada_scraper),
         "-results", str(arquivo_bruto),
         "-lang", "pt",
         "-depth", "5",
