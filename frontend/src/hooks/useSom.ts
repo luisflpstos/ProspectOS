@@ -14,14 +14,18 @@ export type NomeSom = keyof typeof SONS
 
 const CHAVE_ATIVADO = "som-ativado"
 const CHAVE_VOLUME = "som-volume"
+const VOLUME_PADRAO = 0.5
 
 function lerSomAtivado(): boolean {
   return localStorage.getItem(CHAVE_ATIVADO) !== "false"
 }
 
 function lerSomVolume(): number {
-  const salvo = Number(localStorage.getItem(CHAVE_VOLUME))
-  return Number.isFinite(salvo) && salvo >= 0 && salvo <= 1 ? salvo : 0.5
+  const bruto = localStorage.getItem(CHAVE_VOLUME)
+  // Number(null) e Number("") viram 0 - sem isso, instalação nova começava muda
+  if (bruto === null || bruto.trim() === "") return VOLUME_PADRAO
+  const salvo = Number(bruto)
+  return Number.isFinite(salvo) && salvo >= 0 && salvo <= 1 ? salvo : VOLUME_PADRAO
 }
 
 export function tocarSom(nome: NomeSom): void {

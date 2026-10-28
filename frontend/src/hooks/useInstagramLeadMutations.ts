@@ -49,7 +49,12 @@ export function useInstagramLeadMutations(leadId: number, postId: number) {
   const salvarObservacoes = useMutation({
     mutationFn: (observacoes: string) =>
       instagramService.atualizarObservacoes(leadId, observacoes),
-    onSuccess: () => toast.success("Observações salvas."),
+    onSuccess: () => {
+      // sem isso, reabrir o modal mostra o texto antigo (o lead vem do cache da lista)
+      queryClient.invalidateQueries({ queryKey: ["instagram-leads", postId] })
+      queryClient.invalidateQueries({ queryKey: ["instagram-lead-historico", leadId] })
+      toast.success("Observações salvas.")
+    },
   })
 
   const gerarMensagem = useMutation({
