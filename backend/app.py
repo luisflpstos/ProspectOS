@@ -24,9 +24,10 @@ import threading
 import webbrowser
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
-from flask import Flask, abort, jsonify, send_from_directory
+from flask import Flask, abort, jsonify, request, send_from_directory
 from werkzeug.exceptions import HTTPException
 
 import paths
@@ -63,6 +64,24 @@ app.register_blueprint(rotas_instagram.bp)
 app.register_blueprint(rotas_analytics.bp)
 app.register_blueprint(rotas_config.bp)
 app.register_blueprint(rotas_conversa.bp)
+
+
+_HOSTS_LOCAIS = {"localhost", "127.0.0.1", "::1"}
+
+
+@app.before_request
+def bloquear_acesso_externo():
+    """A API só atende a própria máquina. Checar o Host barra DNS rebinding (um
+    site externo apontando o próprio domínio pra 127.0.0.1) e checar o Origin
+    nas escritas barra outro site disparando POST/DELETE pelo navegador do
+    usuário (CSRF) - o fetch no-cors chega aqui mesmo sem conseguir ler a
+    resposta. Requisição sem Origin (curl, testes, mesmo-origem em GET) passa."""
+    if urlsplit(f"//{request.host}").hostname not in _HOSTS_LOCAIS:
+        abort(403)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origem = request.headers.get("Origin")
+        if origem is not None and urlsplit(origem).hostname not in _HOSTS_LOCAIS:
+            abort(403)
 
 
 @app.errorhandler(Exception)

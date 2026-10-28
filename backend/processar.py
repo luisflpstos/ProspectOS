@@ -73,6 +73,90 @@ USER_AGENT_NAVEGADOR = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
+MAX_REDIRECIONAMENTOS = 5
+MAX_BYTES_PAGINA = 300_000
+# teto de tempo de parede pra baixar o corpo: o timeout do requests vale por
+# leitura, então um servidor que pinga um byte por vez seguraria o worker
+PRAZO_DOWNLOAD_SEGUNDOS = SITE_TIMEOUT_SEGUNDOS * 2
+
+
+class EnderecoBloqueado(Exception):
+    """URL do lead aponta pra localhost/rede interna - não é site de empresa."""
+
+
+def _host_e_publico(host):
+    """True se o host resolve só para IPs públicos. Falha de DNS devolve True de
+    propósito: o próprio requests levanta o erro e a classificação "domínio não
+    encontrado" continua funcionando."""
+    import ipaddress
+    import socket
+
+    if not host:
+        return False
+    try:
+        enderecos = {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except (socket.gaierror, UnicodeError):
+        return True
+    return all(ipaddress.ip_address(ip.split("%")[0]).is_global for ip in enderecos)
+
+
+class _Pagina:
+    def __init__(self, status_code, url, text, elapsed):
+        self.status_code = status_code
+        self.url = url
+        self.text = text
+        self.elapsed = elapsed
+
+
+def baixar_pagina(url_alvo, verify=True):
+    """GET do site de um lead com as travas que um link de terceiro exige: segue
+    redirecionamentos na mão (no máximo MAX_REDIRECIONAMENTOS) recusando
+    qualquer salto para localhost/rede interna (SSRF - o conteúdo vai parar no
+    prompt da IA), e lê no máximo MAX_BYTES_PAGINA dentro de um prazo total.
+    Levanta as mesmas RequestException do requests; EnderecoBloqueado é uma
+    delas (ConnectionError), então o site só aparece como "não abre"."""
+    import requests
+    from urllib.parse import urljoin
+
+    for _ in range(MAX_REDIRECIONAMENTOS + 1):
+        if not _host_e_publico(urlparse(url_alvo).hostname):
+            raise requests.exceptions.ConnectionError(EnderecoBloqueado(url_alvo))
+        resposta = requests.get(
+            url_alvo,
+            timeout=SITE_TIMEOUT_SEGUNDOS,
+            headers={"User-Agent": USER_AGENT_NAVEGADOR},
+            allow_redirects=False,
+            verify=verify,
+            stream=True,
+        )
+        destino = getattr(resposta, "headers", {}).get("Location") if getattr(resposta, "is_redirect", False) else None
+        if not destino:
+            break
+        resposta.close()
+        url_alvo = urljoin(url_alvo, destino)
+    else:
+        raise requests.exceptions.TooManyRedirects(f"mais de {MAX_REDIRECIONAMENTOS} redirecionamentos")
+
+    if not hasattr(resposta, "iter_content"):
+        return resposta  # dublê dos testes: já vem com .text pronto
+
+    try:
+        pedacos, total, limite = [], 0, time.monotonic() + PRAZO_DOWNLOAD_SEGUNDOS
+        for pedaco in resposta.iter_content(chunk_size=16_384):
+            pedacos.append(pedaco)
+            total += len(pedaco)
+            if total >= MAX_BYTES_PAGINA or time.monotonic() > limite:
+                break
+        bruto = b"".join(pedacos)[:MAX_BYTES_PAGINA]
+        # UTF-8 primeiro: sem charset no header o requests chutaria ISO-8859-1
+        # e os acentos dos sites (quase todos UTF-8) sairiam embaralhados
+        try:
+            texto = bruto.decode("utf-8")
+        except UnicodeDecodeError:
+            texto = bruto.decode(resposta.encoding or "latin-1", errors="replace")
+    finally:
+        resposta.close()
+    return _Pagina(resposta.status_code, resposta.url, texto, resposta.elapsed)
 
 
 # Construtores de site genéricos/gratuitos: o site "funciona", mas é modelo
@@ -141,7 +225,12 @@ def _e_falha_de_dns(erro):
 
 # Itens do raio-X: (nome exibido, função html/url_final → bool "tem")
 REGEX_CEP = re.compile(r"\b\d{5}-\d{3}\b")
-REGEX_ANO_COPYRIGHT = re.compile(r"(?:©|&copy;|copyright)\D{0,20}(20\d{2})", re.IGNORECASE)
+# captura também o fim de um intervalo ("© 2001-2026"): só o primeiro ano
+# marcaria como desatualizado um site mantido em dia desde 2001
+REGEX_ANO_COPYRIGHT = re.compile(
+    r"(?:©|&copy;|copyright)\D{0,20}(20\d{2})(?:\s*(?:-|–|&ndash;|a|to)\s*(20\d{2}))?",
+    re.IGNORECASE,
+)
 
 
 def montar_checklist_site(html, url_final):
@@ -176,7 +265,7 @@ def montar_checklist_site(html, url_final):
         "falta": [nome for nome, presente in itens if not presente],
     }
 
-    anos = [int(a) for a in REGEX_ANO_COPYRIGHT.findall(html or "")]
+    anos = [int(a) for par in REGEX_ANO_COPYRIGHT.findall(html or "") for a in par if a]
     ano_recente = max(anos) if anos else None
     return checklist, ano_recente
 
@@ -197,13 +286,7 @@ def avaliar_site_completo(url):
     from requests.exceptions import RequestException, SSLError
 
     def requisitar(url_alvo, verify=True):
-        return requests.get(
-            url_alvo,
-            timeout=SITE_TIMEOUT_SEGUNDOS,
-            headers={"User-Agent": USER_AGENT_NAVEGADOR},
-            allow_redirects=True,
-            verify=verify,
-        )
+        return baixar_pagina(url_alvo, verify=verify)
 
     def requisitar_com_retentativa(url_alvo, verify=True):
         """Uma nova tentativa em falha transitória; DNS morto falha na hora."""
@@ -308,12 +391,7 @@ def capturar_conteudo_site(url):
 
     url_completa = url if url.lower().startswith(("http://", "https://")) else f"https://{url}"
     try:
-        resposta = requests.get(
-            url_completa,
-            timeout=SITE_TIMEOUT_SEGUNDOS,
-            headers={"User-Agent": USER_AGENT_NAVEGADOR},
-            allow_redirects=True,
-        )
+        resposta = baixar_pagina(url_completa)
     except RequestException:
         return None
     if resposta.status_code >= 400:
@@ -749,11 +827,22 @@ def telefone_limpo(telefone_bruto):
     return re.sub(r"\D", "", telefone_bruto or "") or None
 
 
+def id_da_query(indice):
+    """input_id determinístico da query de índice `indice` (0-based) do
+    queries.txt - o scraper recebe "texto #!# q0" e grava esse id no CSV; a
+    Places API usa o mesmo formato."""
+    return f"q{indice}"
+
+
+REGEX_ID_QUERY = re.compile(r"q(\d+)")
+
+
 def mapear_queries_por_input_id(caminho_csv_bruto, caminho_queries):
     """
-    O scraper não grava o texto da query no CSV, só um 'input_id' (um UUID por busca).
-    Como cada busca do queries.txt vira exatamente um input_id, associamos pela ordem
-    de aparição no CSV com a ordem das linhas do queries.txt.
+    O CSV não traz o texto da query, só o 'input_id'. Com id determinístico
+    ("q<índice>", ver id_da_query) o mapeamento é direto. Ids antigos (UUID por
+    busca) caem no casamento pela ordem de aparição - frágil: uma query sem
+    resultado não gera linha e desloca todas as seguintes.
     """
     if not caminho_queries or not Path(caminho_queries).exists():
         return {}
@@ -761,14 +850,22 @@ def mapear_queries_por_input_id(caminho_csv_bruto, caminho_queries):
     with open(caminho_queries, encoding="utf-8") as arquivo:
         queries = [linha.strip() for linha in arquivo if linha.strip()]
 
-    ids_em_ordem = []
+    mapa = {}
+    ids_sem_indice = []
     with open(caminho_csv_bruto, encoding="utf-8") as arquivo:
         for linha in csv.DictReader(arquivo):
             input_id = linha.get("input_id")
-            if input_id and input_id not in ids_em_ordem:
-                ids_em_ordem.append(input_id)
+            if not input_id or input_id in mapa or input_id in ids_sem_indice:
+                continue
+            casamento = REGEX_ID_QUERY.fullmatch(input_id)
+            if casamento and int(casamento.group(1)) < len(queries):
+                mapa[input_id] = queries[int(casamento.group(1))]
+            else:
+                ids_sem_indice.append(input_id)
 
-    return dict(zip(ids_em_ordem, queries))
+    if ids_sem_indice and not mapa:
+        mapa.update(zip(ids_sem_indice, queries))
+    return mapa
 
 
 def telefone_para_whatsapp(telefone_bruto):
@@ -902,13 +999,20 @@ def processar(caminho_csv_bruto, caminho_queries=CAMINHO_QUERIES_PADRAO, callbac
     # rede, então rodar várias ao mesmo tempo reduz muito o tempo total desta etapa)
     resultados_verificacao = {}
     with ThreadPoolExecutor(max_workers=VERIFICACOES_PARALELAS) as executor:
-        futuros = [
-            executor.submit(_verificar_candidata, indice, linha)
+        futuros = {
+            executor.submit(_verificar_candidata, indice, linha): (indice, linha)
             for indice, (linha, _) in enumerate(candidatas)
-        ]
+        }
         for futuro in as_completed(futuros):
-            indice, linha, site_real_encontrado = futuro.result()
-            resultados_verificacao[indice] = site_real_encontrado
+            indice, linha = futuros[futuro]
+            try:
+                _indice, _linha, site_real_encontrado = futuro.result()
+                resultados_verificacao[indice] = site_real_encontrado
+            except Exception:
+                # uma empresa com erro inesperado não pode derrubar o lote todo
+                # (e jogar fora as verificações já feitas): ela cai no padrão
+                # "sem_site" da fase 3
+                logger.exception("falha ao verificar o site de %s", linha.get("title"))
             processadas += 1
             if callback_progresso:
                 callback_progresso(processadas, total_candidatas, linha.get("title") or "")

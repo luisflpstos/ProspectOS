@@ -11,7 +11,11 @@ backups/
 backups_manuais/
 .pytest_cache/
 google-maps-scraper.exe
+google-maps-scraper.exe.bak-*
+build-scraper/out/
 queries.txt
+queries-*.txt
+queries_scraper.txt
 instagram/sessao/
 instagram/comentarios/
 # porta escolhida em runtime (escrita pelo app.py a cada inicio)

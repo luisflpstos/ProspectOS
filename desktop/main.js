@@ -132,7 +132,26 @@ function subirBackend() {
 // WhatsApp Web em janela interna
 // ---------------------------------------------------------------------------
 
-const REGEX_WHATSAPP = /^https:\/\/(wa\.me|api\.whatsapp\.com|web\.whatsapp\.com)/;
+const HOSTS_WHATSAPP = new Set(["wa.me", "api.whatsapp.com", "web.whatsapp.com"]);
+const ORIGEM_WHATSAPP_WEB = "https://web.whatsapp.com";
+
+/** Faz o parse da URL sem lançar (URL inválida → null). */
+function lerUrl(url) {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
+  }
+}
+
+function ehHttp(u) {
+  return u.protocol === "http:" || u.protocol === "https:";
+}
+
+/** Compara o host exato (prefixo de string deixava passar "wa.me.evil.com"). */
+function ehLinkWhatsapp(u) {
+  return u.protocol === "https:" && HOSTS_WHATSAPP.has(u.hostname);
+}
 
 /** Converte wa.me/api.whatsapp.com direto pro WhatsApp Web (pula o interstício). */
 function urlParaWhatsappWeb(url) {
@@ -186,6 +205,7 @@ function abrirWhatsapp(url) {
     },
   });
   janelaWhatsapp.webContents.setUserAgent(userAgentChrome());
+  prenderNoWhatsappWeb(janelaWhatsapp.webContents);
   janelaWhatsapp.loadURL(destino, { userAgent: userAgentChrome() });
   janelaWhatsapp.on("closed", () => {
     janelaWhatsapp = null;
@@ -252,18 +272,58 @@ function registrarPonteWhatsapp() {
   });
 }
 
+/**
+ * A janela do WhatsApp só pode ficar em https://web.whatsapp.com: links de
+ * WhatsApp continuam nela, outros http(s) vão pro navegador real e o resto é
+ * bloqueado.
+ */
+function prenderNoWhatsappWeb(conteudo) {
+  const encaminhar = (u) => {
+    if (ehLinkWhatsapp(u)) abrirWhatsapp(u.href);
+    else if (ehHttp(u)) shell.openExternal(u.href);
+  };
+
+  conteudo.setWindowOpenHandler(({ url }) => {
+    const u = lerUrl(url);
+    if (u) encaminhar(u);
+    return { action: "deny" };
+  });
+
+  conteudo.on("will-navigate", (evento, url) => {
+    const u = lerUrl(url);
+    if (u && u.origin === ORIGEM_WHATSAPP_WEB) return;
+    evento.preventDefault();
+    if (u) encaminhar(u);
+  });
+}
+
 /** Links que saem do app: WhatsApp vira janela interna, o resto abre no navegador. */
 function rotearLinksExternos(conteudo, porta) {
+  const origemLocal = `http://127.0.0.1:${porta}`;
+
+  /** Encaminha um link de fora do app; nunca abre nada dentro da janela principal. */
+  const encaminharParaFora = (u) => {
+    if (ehLinkWhatsapp(u)) abrirWhatsapp(u.href);
+    else if (ehHttp(u)) shell.openExternal(u.href);
+    // demais protocolos (file:, javascript:, esquemas customizados...) são bloqueados
+  };
+
   conteudo.setWindowOpenHandler(({ url }) => {
-    if (REGEX_WHATSAPP.test(url)) {
-      abrirWhatsapp(url);
-      return { action: "deny" };
-    }
-    if (/^https?:\/\//.test(url) && !url.startsWith(`http://127.0.0.1:${porta}`)) {
-      shell.openExternal(url);
-      return { action: "deny" };
-    }
-    return { action: "allow" };
+    const u = lerUrl(url);
+    if (!u) return { action: "deny" };
+    // compara a origem exata - prefixo de string deixava passar
+    // "http://127.0.0.1:5000@evil.com" ou a porta 50001
+    if (u.origin === origemLocal) return { action: "allow" };
+    encaminharParaFora(u);
+    return { action: "deny" };
+  });
+
+  // a janela principal nunca sai da origem local
+  conteudo.on("will-navigate", (evento, url) => {
+    const u = lerUrl(url);
+    if (u && u.origin === origemLocal) return;
+    evento.preventDefault();
+    if (u) encaminharParaFora(u);
   });
 }
 
@@ -422,21 +482,25 @@ function verificarAtualizacoes(avisar) {
 // Ciclo de vida
 // ---------------------------------------------------------------------------
 
-app.whenReady().then(async () => {
-  try {
-    montarMenu();
-    registrarPonteWhatsapp();
-    const porta = await subirBackend();
-    criarJanela(porta);
-    configurarAutoUpdate();
-  } catch (erro) {
-    dialog.showErrorBox(
-      "ProspectOS não conseguiu iniciar",
-      `${erro.message}\n\nVeja os logs em %APPDATA%\\ProspectOS\\logs\\prospeccao.log`
-    );
-    app.quit();
-  }
-});
+// só a primeira instância sobe o backend - a segunda já chamou app.quit() lá em
+// cima, mas o whenReady ainda dispararia e subiria um segundo backend
+if (primeiraInstancia) {
+  app.whenReady().then(async () => {
+    try {
+      montarMenu();
+      registrarPonteWhatsapp();
+      const porta = await subirBackend();
+      criarJanela(porta);
+      configurarAutoUpdate();
+    } catch (erro) {
+      dialog.showErrorBox(
+        "ProspectOS não conseguiu iniciar",
+        `${erro.message}\n\nVeja os logs em %APPDATA%\\ProspectOS\\logs\\prospeccao.log`
+      );
+      app.quit();
+    }
+  });
+}
 
 app.on("window-all-closed", () => {
   // encerra o backend junto com a janela (não deixamos processo órfão)

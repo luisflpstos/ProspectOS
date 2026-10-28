@@ -43,6 +43,12 @@ export function useAnaliseInstagram() {
       setPoll(false)
       setResultadoFinal(statusAnalise.data)
       queryClient.invalidateQueries({ queryKey: ["instagram-posts"] })
+      queryClient.invalidateQueries({ queryKey: ["instagram-leads"] })
+      queryClient.invalidateQueries({ queryKey: ["instagram-metricas"] })
+      queryClient.invalidateQueries({ queryKey: ["instagram-analytics"] })
+      queryClient.invalidateQueries({ queryKey: ["instagram-nichos"] })
+      queryClient.invalidateQueries({ queryKey: ["metricas-combinadas"] })
+      queryClient.invalidateQueries({ queryKey: ["tarefas-hoje"] })
       tocarSom("analise-instagram-concluida")
     }
   }, [poll, statusAnalise.data, queryClient])

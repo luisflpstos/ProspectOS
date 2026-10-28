@@ -6,7 +6,6 @@ apontarem tudo para um banco temporário com um único monkeypatch.
 """
 
 import logging
-import shutil
 import sqlite3
 import os
 from datetime import datetime
@@ -165,11 +164,23 @@ def fazer_backup_banco():
     PASTA_BACKUPS.mkdir(exist_ok=True)
     carimbo = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     destino = PASTA_BACKUPS / f"leads_{carimbo}.db"
+    # API de backup do SQLite em vez de copiar o arquivo: em modo WAL os commits
+    # recentes ainda moram no leads.db-wal, e uma cópia crua sairia desatualizada
+    # (ou corrompida, se pegasse um checkpoint no meio)
     try:
-        shutil.copy2(CAMINHO_BANCO, destino)
+        origem = conectar()
+        try:
+            copia = sqlite3.connect(destino)
+            try:
+                origem.backup(copia)
+            finally:
+                copia.close()
+        finally:
+            origem.close()
         logger.info("backup do banco criado em %s", destino)
-    except OSError:
+    except (OSError, sqlite3.Error):
         logger.exception("não foi possível criar backup do banco")
+        destino.unlink(missing_ok=True)
         return
 
     arquivos = sorted(PASTA_BACKUPS.glob("leads_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)

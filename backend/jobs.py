@@ -77,17 +77,24 @@ def _agora():
 
 
 def _registrar_inicio_job(tipo, referencia_id=None):
-    conexao = db.conectar()
+    """Nunca levanta: é chamado antes do try/finally dos jobs, e uma exceção aqui
+    deixaria a flag "rodando" presa (toda busca nova tomaria 409 até reiniciar).
+    Sem registro, o job roda igual - só não aparece no histórico."""
     try:
-        cursor = conexao.execute(
-            "INSERT INTO jobs (tipo, status, iniciado_em, atualizado_em, referencia_id) "
-            "VALUES (?, 'rodando', ?, ?, ?)",
-            (tipo, _agora(), _agora(), referencia_id),
-        )
-        conexao.commit()
-        return cursor.lastrowid
-    finally:
-        conexao.close()
+        conexao = db.conectar()
+        try:
+            cursor = conexao.execute(
+                "INSERT INTO jobs (tipo, status, iniciado_em, atualizado_em, referencia_id) "
+                "VALUES (?, 'rodando', ?, ?, ?)",
+                (tipo, _agora(), _agora(), referencia_id),
+            )
+            conexao.commit()
+            return cursor.lastrowid
+        finally:
+            conexao.close()
+    except Exception:
+        logger.exception("não foi possível registrar o início do job %s", tipo)
+        return None
 
 
 def _atualizar_job(job_id, etapa=None, mensagem=None, progresso_atual=None, progresso_total=None):
@@ -143,12 +150,22 @@ def marcar_jobs_interrompidos():
             "WHERE status = 'rodando'",
             (_agora(), _agora()),
         )
+        # o post do Instagram guarda a etapa à parte: sem isto ele ficaria "em
+        # andamento" pra sempre e o botão de retomar (que exige etapa 'erro')
+        # nunca apareceria
+        cursor_posts = conexao.execute(
+            "UPDATE instagram_posts SET etapa = 'erro', "
+            "erro_mensagem = 'Análise interrompida (o app foi fechado no meio).' "
+            "WHERE etapa IN ('pendente', 'raspando', 'enriquecendo')"
+        )
         conexao.commit()
         if cursor.rowcount:
             logger.warning(
                 "%s job(s) estavam rodando quando o backend foi encerrado - marcados como interrompidos",
                 cursor.rowcount,
             )
+        if cursor_posts.rowcount:
+            logger.warning("%s análise(s) do Instagram marcadas como interrompidas", cursor_posts.rowcount)
     finally:
         conexao.close()
 
@@ -233,6 +250,21 @@ def _ler_stderr_em_thread(pipe, buffer_lista):
     pipe.close()
 
 
+def _encerrar_arvore(processo):
+    """Mata o processo E os filhos dele. No Windows, Popen.kill() só derruba o
+    scraper e deixa os Chromium do Playwright rodando (e segurando arquivos)."""
+    if processo.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(processo.pid), "/T", "/F"],
+            capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    if processo.poll() is None:
+        processo.kill()
+
+
 def rodar_scraper_com_progresso(comando, cwd, env, timeout_segundos, callback_linha=None):
     """Roda o scraper igual subprocess.run(), mas lê o stdout linha a linha em tempo
     real (em vez de esperar o processo inteiro terminar), chamando callback_linha
@@ -255,24 +287,34 @@ def rodar_scraper_com_progresso(comando, cwd, env, timeout_segundos, callback_li
     )
     thread_stderr.start()
 
+    # o timeout precisa valer mesmo se o scraper travar calado: checar o relógio
+    # só a cada linha do stdout deixaria o `for` bloqueado pra sempre
+    estourou = threading.Event()
+
+    def _matar_por_timeout():
+        estourou.set()
+        _encerrar_arvore(processo)
+
+    vigia = threading.Timer(timeout_segundos, _matar_por_timeout)
+    vigia.daemon = True
+    vigia.start()
+
     inicio = time.monotonic()
     try:
         for linha in processo.stdout:
-            if time.monotonic() - inicio > timeout_segundos:
-                processo.kill()
-                processo.wait(timeout=5)
-                raise subprocess.TimeoutExpired(comando, timeout_segundos)
-
             if callback_linha:
                 callback_linha(linha)
 
         tempo_restante = max(1, timeout_segundos - (time.monotonic() - inicio))
         returncode = processo.wait(timeout=tempo_restante)
+        if estourou.is_set():
+            raise subprocess.TimeoutExpired(comando, timeout_segundos)
     except subprocess.TimeoutExpired:
-        processo.kill()
+        _encerrar_arvore(processo)
         processo.wait(timeout=5)
         raise
     finally:
+        vigia.cancel()
         processo.stdout.close()
         thread_stderr.join(timeout=5)
 
@@ -318,9 +360,20 @@ def zoom_para_raio(raio_m):
 def _executar_scraper(arquivo_bruto, ambiente, flags_extras=()):
     """Roda o binário do scraper uma vez, com progresso ao vivo.
     Retorna None em sucesso, ou a mensagem de erro amigável em falha."""
+    # cada linha leva um id fixo ("texto #!# q0") que o scraper grava no
+    # input_id do CSV - sem isso o pipeline teria que adivinhar a query de cada
+    # lead pela ordem de saída, e uma query sem resultado deslocaria as demais
+    entrada_scraper = DIR_DADOS / "queries_scraper.txt"
+    entrada_scraper.write_text(
+        "".join(
+            f"{texto} #!# {processar.id_da_query(indice)}\n"
+            for indice, texto in enumerate(_ler_queries_da_busca())
+        ),
+        encoding="utf-8",
+    )
     comando_scraper = [
         str(caminho_recurso("google-maps-scraper.exe")),
-        "-input", str(DIR_DADOS / "queries.txt"),
+        "-input", str(entrada_scraper),
         "-results", str(arquivo_bruto),
         "-lang", "pt",
         "-depth", "5",
@@ -739,6 +792,9 @@ def _rodar_analise_instagram_em_background(post_id, post_url, nicho_alvo=None, a
                 # comentários novos e atualiza os dados "vivos" do perfil, mas
                 # nunca mexe no que é do usuário (status, tags, observações,
                 # follow-up) - mesma filosofia do upsert dos leads do Maps.
+                # O post_id também fica o original: excluir um post depois
+                # apaga os leads dele, e mover o lead pro post mais recente
+                # faria um lead já trabalhado sumir junto com outro post.
                 existente = conexao.execute(
                     "SELECT comentarios FROM instagram_leads WHERE username = ?",
                     (perfil["username"],),
@@ -758,10 +814,9 @@ def _rodar_analise_instagram_em_background(post_id, post_url, nicho_alvo=None, a
                         # a coleta falhou nesta rodada: não sobrescreve com None
                         # os dados bons já salvos, só junta os comentários novos
                         conexao.execute(
-                            "UPDATE instagram_leads SET post_id = ?, comentarios = ?, atualizado_em = ? "
+                            "UPDATE instagram_leads SET comentarios = ?, atualizado_em = ? "
                             "WHERE username = ?",
                             (
-                                post_id,
                                 json.dumps(comentarios_mesclados, ensure_ascii=False),
                                 agora,
                                 perfil["username"],
@@ -771,7 +826,7 @@ def _rodar_analise_instagram_em_background(post_id, post_url, nicho_alvo=None, a
                         conexao.execute(
                             """
                             UPDATE instagram_leads SET
-                                post_id = ?, full_name = ?, is_private = ?, biography = ?,
+                                full_name = ?, is_private = ?, biography = ?,
                                 seguidores = ?, is_business_account = ?, comentarios = ?,
                                 prioridade = COALESCE(?, prioridade),
                                 nicho = COALESCE(?, nicho),
@@ -781,7 +836,6 @@ def _rodar_analise_instagram_em_background(post_id, post_url, nicho_alvo=None, a
                             WHERE username = ?
                             """,
                             (
-                                post_id,
                                 perfil.get("full_name"),
                                 int(bool(perfil.get("is_private"))) if "is_private" in perfil else None,
                                 perfil.get("biography"),

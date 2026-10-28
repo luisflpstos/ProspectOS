@@ -1,8 +1,6 @@
 """Rotas do CRM de leads do Google Maps: listagem, funil de status, tags,
 observações, follow-up, geração de mensagem, exportação e disparo da busca."""
 
-import csv
-import io
 import json
 import logging
 from datetime import date, datetime, timedelta
@@ -11,6 +9,7 @@ from flask import Blueprint, Response, jsonify, request
 
 import db
 import diagnostico
+import exportacao
 import ia
 import jobs
 import paths
@@ -765,19 +764,15 @@ def exportar_csv():
     finally:
         conexao.close()
 
-    saida = io.StringIO()
-    escritor = csv.writer(saida)
-    escritor.writerow(
+    return exportacao.resposta_csv(
         [
             "nome", "categoria", "endereco", "nota", "num_avaliacoes", "status",
             "tags", "whatsapp_link", "telefone", "observacoes", "nicho", "cidade",
             "query_origem", "proximo_followup", "follow_ups_enviados",
             "ultimo_followup_em", "mensagem_gerada",
             "site_status", "site_url", "site_problemas", "instagram_url",
-        ]
-    )
-    for lead in linhas:
-        escritor.writerow(
+        ],
+        (
             [
                 lead["nome"],
                 lead["categoria"],
@@ -801,11 +796,10 @@ def exportar_csv():
                 lead["site_problemas"] or "",
                 lead["instagram_url"] or "",
             ]
-        )
-
-    resposta = Response(saida.getvalue(), mimetype="text/csv; charset=utf-8")
-    resposta.headers["Content-Disposition"] = "attachment; filename=leads_exportados.csv"
-    return resposta
+            for lead in linhas
+        ),
+        "leads_exportados.csv",
+    )
 
 
 def _validar_busca_por_texto(corpo):

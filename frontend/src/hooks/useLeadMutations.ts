@@ -1,4 +1,4 @@
-import { useMutation } from "@tanstack/react-query"
+import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { leadsService } from "@/services/leadsService"
 import { useInvalidarLeads } from "@/hooks/useInvalidarLeads"
@@ -12,6 +12,7 @@ interface EstadoFollowupAnterior {
 }
 
 export function useLeadMutations(placeId: string) {
+  const queryClient = useQueryClient()
   const invalidarListaEMetricas = useInvalidarLeads()
 
   const atualizarStatus = useMutation({
@@ -39,7 +40,12 @@ export function useLeadMutations(placeId: string) {
   const salvarObservacoes = useMutation({
     mutationFn: (observacoes: string) =>
       leadsService.atualizarObservacoes(placeId, observacoes),
-    onSuccess: () => toast.success("Observações salvas."),
+    onSuccess: () => {
+      // sem isso, reabrir o modal mostra o texto antigo (o lead vem do cache da lista)
+      queryClient.invalidateQueries({ queryKey: ["leads"] })
+      queryClient.invalidateQueries({ queryKey: ["lead-historico", placeId] })
+      toast.success("Observações salvas.")
+    },
   })
 
   const gerarMensagem = useMutation({
